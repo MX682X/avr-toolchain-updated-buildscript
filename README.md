@@ -9,4 +9,6 @@ I was often (un-) commenting some lines when building so you might have to play 
 
 Things were buildable in a Ubuntu x64 Virtual Machine for 64-bit Windows and Linux. 32-bit Windows always failed because of redefinitions.
 
-Before you can Cross-Compile, e.g. compiling a windows binary in linux, you have to compile the build system binaries first as gcc has to compile the start-up files. The objdir can than be simply renamed to "avr-gcc-buildsys" or whatever you define in the config file
+Before you can Cross-Compile, e.g. compiling a windows binary in linux, you have to compile the build system binaries first as gcc has to compile the start-up files. The objdir can than be simply renamed to "avr-gcc-buildsys" or whatever you define in the config file.
+
+You will also have to specify a download folder for the archives. The pre-defined folder-name is "downloads". As github does not make you upload empty folders, you need to create one yourself.
