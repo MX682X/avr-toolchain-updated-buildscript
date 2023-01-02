@@ -1,0 +1,413 @@
+diff -ur ./downloads/gcc-8.5.0/gcc/config/avr/avr-arch.h ./gcc/gcc/config/avr/avr-arch.h
+--- ./downloads/gcc-8.5.0/gcc/config/avr/avr-arch.h	2021-05-14 10:42:08.000000000 +0200
++++ ./gcc/config/avr/avr-arch.h	2022-12-28 22:10:23.317024378 +0100
+@@ -124,6 +124,9 @@
+   /* Start of text section. */
+   int text_section_start;
+ 
++  /* Non bit addressable registers mask.  */
++  unsigned int non_bit_addressable_registers_mask;
++
+   /* Flash size in bytes.  */
+   int flash_size;
+ 
+diff -ur gcc/gcc/config/avr/avr.cc gcc-7.3.0-patched/gcc/config/avr/avr.cc
+--- gcc/gcc/config/avr/avr.cc	2017-08-22 09:55:34.767308000 +0200
++++ gcc-7.3.0-patched/gcc/config/avr/avr.cc	2018-12-03 11:05:34.994764831 +0100
+@@ -54,6 +55,8 @@
+ #include "builtins.h"
+ #include "context.h"
+ #include "tree-pass.h"
++#include "vec.h"
++#include "opts.h"
+ #include "print-rtl.h"
+ #include "rtl-iter.h"
+ 
+@@ -121,6 +133,8 @@
+   { ADDR_SPACE_MEMX, 1, 3, "__memx",  0, ".progmemx.data" },
+ };
+ 
++unsigned long avr_non_bit_addressable_registers_mask;
++
+ 
+ /* Holding RAM addresses of some SFRs used by the compiler and that
+    are unique over all devices in an architecture like 'avr4'.  */
+    
+@@ -724,6 +736,58 @@
+   return false;
+ }
+ 
++/* Same as opts-common.c:integral_argument, but uses strtoul instead
++	 of atoi/strtol. */
++
++static unsigned long
++parse_unsigned_long (const char *arg)
++{
++  const char *p = arg;
++
++  while (*p && ISDIGIT (*p))
++    p++;
++
++  if (*p == '\0')
++    return strtoul(arg, NULL, 10);
++
++  /* It wasn't a decimal number - try hexadecimal.  */
++  if (arg[0] == '0' && (arg[1] == 'x' || arg[1] == 'X'))
++    {
++      p = arg + 2;
++      while (*p && ISXDIGIT (*p))
++				p++;
++
++      if (p != arg + 2 && *p == '\0')
++				return strtoul(arg, NULL, 16);
++    }
++
++	warning (OPT_mnon_bit_addressable_registers_mask_,
++					 "argument is not a number, ignored");
++  return 0;
++}
++
++static void
++avr_handle_deferred_options(void) {
++
++  unsigned int i;
++  cl_deferred_option *opt;
++  vec<cl_deferred_option> *v
++    = (vec<cl_deferred_option> *) avr_deferred_options;
++
++  if (v)
++    FOR_EACH_VEC_ELT (*v, i, opt)
++      {
++				switch (opt->opt_index)
++					{
++					case OPT_mnon_bit_addressable_registers_mask_:
++						avr_non_bit_addressable_registers_mask = parse_unsigned_long (opt->arg);
++						break;
++
++					default:
++						gcc_unreachable ();
++					}
++			}
++}
+ 
+ /* Implement `TARGET_OPTION_OVERRIDE'.  */
+ 
+@@ -797,7 +861,12 @@
+ 
+   init_machine_status = avr_init_machine_status;
+ 
++  if (!global_options_set.x_dwarf_version)
++    dwarf_version = 2;
++
+   avr_log_set_avr_log();
++
++  avr_handle_deferred_options();
+ }
+ 
+ /* Function to set up the backend function structure.  */
+ 
+@@ -981,6 +1050,15 @@
+   return avr_lookup_function_attribute1 (func, "interrupt");
+ }
+ 
++/* Return nonzero if FUNC is an nmi function as specified
++   by the "nmi" attribute.  */
++
++static int
++avr_nmi_function_p (tree func)
++{
++  return avr_lookup_function_attribute1 (func, "nmi");
++}
++
+ /* Return nonzero if FUNC is a signal function as specified
+    by the "signal" attribute.  */
+ 
+@@ -1034,25 +1112,34 @@
+   cfun->machine->is_naked = avr_naked_function_p (decl);
+   cfun->machine->is_signal = avr_signal_function_p (decl);
+   cfun->machine->is_interrupt = avr_interrupt_function_p (decl);
++  cfun->machine->is_nmi = avr_nmi_function_p (decl);
+   cfun->machine->is_OS_task = avr_OS_task_function_p (decl);
+   cfun->machine->is_OS_main = avr_OS_main_function_p (decl);
+   cfun->machine->is_no_gccisr = avr_no_gccisr_function_p (decl);
+ 
+-  isr = cfun->machine->is_interrupt ? "interrupt" : "signal";
++  if (cfun->machine->is_interrupt)
++    isr = "interrupt";
++  else if (cfun->machine->is_nmi)
++    isr = "nmi";
++  else
++    isr = "signal";
+ 
+   /* Too much attributes make no sense as they request conflicting features. */
+ 
+    if (cfun->machine->is_OS_task
+-      + && (cfun->machine->is_signal || cfun->machine->is_interrupt))
++      + && (cfun->machine->is_signal || cfun->machine->is_interrupt 
++          || cfun->machine->is_nmi) > 1)
+    error_at (loc, "function attributes %qs and %qs are mutually exclusive",
+               "OS_task", isr);
+    
+    if (cfun->machine->is_OS_main
+-      + && (cfun->machine->is_signal || cfun->machine->is_interrupt))
++      + && (cfun->machine->is_signal || cfun->machine->is_interrupt 
++          || cfun->machine->is_nmi) > 1)
+    error_at (loc, "function attributes %qs and %qs are mutually exclusive",
+              "OS_main", isr);
+ 
+-  if (cfun->machine->is_interrupt || cfun->machine->is_signal)
++  if (cfun->machine->is_interrupt || cfun->machine->is_signal 
++          || cfun->machine->is_nmi)
+     {
+       tree args = TYPE_ARG_TYPES (TREE_TYPE (decl));
+       tree ret = TREE_TYPE (TREE_TYPE (decl));
+
+@@ -2356,7 +2642,7 @@
+   if (CONST == GET_CODE (x))
+     x = XEXP (XEXP (x, 0), 0);
+ 
+-  if (SYMBOL_REF_P (x))
++  if (SYMBOL_REF == GET_CODE (x))
+     return SYMBOL_REF_FLAGS (x) & AVR_SYMBOL_FLAG_TINY_ABSDATA;
+ 
+   if (CONST_INT_P (x)
+   
+@@ -2863,8 +2949,8 @@
+ 
+       if ('i' != code)
+         fprintf (file, HOST_WIDE_INT_PRINT_DEC, ival + abcd);
+-      else if (low_io_address_operand (x, VOIDmode)
+-               || high_io_address_operand (x, VOIDmode))
++      /* else if Low or High IO address operand */
++      else if (io_address_operand (x, VOIDmode))
+         {
+           if (AVR_HAVE_RAMPZ && ival == avr_addr.rampz)
+             fprintf (file, "__RAMPZ__");
+             
+@@ -3899,6 +3985,48 @@
+   return "";
+ }
+ 
++/*
++The range check is needed only if the device has SRAM greater than
++LDS/STS range. Only attiny40 has that much SRAM and needs special
++consideration. Also include avrtiny, as code compiled for avrtiny is
++supposed to work for all devices in the arch.
++*/
++static bool tiny_device_has_out_of_range_sram ()
++{
++    return AVR_TINY &&
++        (strcmp (avr_mmcu, "attiny40") == 0
++         ||  strcmp (avr_mmcu, "avrtiny") == 0);
++}
++
++/*
++AVRTC-579
++if operand is symbol or constant expression with value > 0xbf
++  return false, otherwise true
++This check is used to avoid lds/sts instruction with invalid memory
++access range (valid range 0x40..0xbf). For io operand range 0x0..0x3f,
++in/out instruction will be generated.
++*/
++bool tiny_valid_direct_memory_access_range(rtx op, enum machine_mode mode)
++{
++  rtx x;
++
++  if (!AVR_TINY)
++    return true;
++
++  x = XEXP(op,0);
++
++  if (MEM_P(op) && x && (GET_CODE(x) == SYMBOL_REF))
++  {
++    return !tiny_device_has_out_of_range_sram ();
++  }
++  if (MEM_P(op) && x && (CONSTANT_ADDRESS_P (x)) &&
++     !(IN_RANGE (INTVAL (x), 0, 0xC0 - GET_MODE_SIZE (mode))))
++  {
++    return false;
++  }
++
++  return true;
++}
+ 
+ const char*
+ output_movqi (rtx_insn *insn, rtx operands[], int *plen)
+ 
+@@ -9799,7 +9927,7 @@
+ 			 (GEN_INT (TREE_INT_CST_LOW (arg)), QImode)))
+ 	{
+ 	  warning_at (loc, OPT_Wattributes, "%qE attribute address "
+-		      "out of range", name);
++		      "out of range or not bit addressable", name);
+ 	  *no_add = true;
+ 	}
+       else
+       
+@@ -9865,6 +9993,8 @@
+   { "interrupt", 0, 0, true,  false, false, false,
+     avr_handle_fndecl_attribute, NULL },
++  { "nmi",       0, 0, true,  false, false, false,
++    avr_handle_fndecl_attribute, NULL },
+   { "no_gccisr", 0, 0, true,  false, false, false,
+     avr_handle_fndecl_attribute, NULL },
+     
+@@ -10448,8 +10608,8 @@
+       && decl
+       && VAR_DECL == TREE_CODE (decl)
+       && MEM_P (rtl)
+-      && SYMBOL_REF_P (XEXP (rtl, 0)))
++      && SYMBOL_REF == GET_CODE (XEXP (rtl, 0)))
+     {
+       rtx sym = XEXP (rtl, 0);
+       bool progmem_p = -1 == avr_progmem_p (decl, DECL_ATTRIBUTES (decl));
+ 
+ 
+@@ -10773,7 +10937,11 @@
+       return true;
+ 
+     case MEM:
+-      *total = COSTS_N_INSNS (GET_MODE_SIZE (mode));
++      /* MEM rtx with non-default address space is more
++         expensive. Not expressing that results in reg
++         clobber during expand (PR 65657). */
++      *total = COSTS_N_INSNS (GET_MODE_SIZE (mode)
++                  + (MEM_ADDR_SPACE(x) == ADDR_SPACE_RAM ? 0 : 5));
+       return true;
+ 
+     case NEG:
+
+diff -ur gcc/gcc/config/avr/avr.h gcc-7.3.0-patched/gcc/config/avr/avr.h
+--- gcc/gcc/config/avr/avr.h	2017-01-16 10:48:45.991005000 +0100
++++ gcc-7.3.0-patched/gcc/config/avr/avr.h	2018-11-29 15:40:15.268967655 +0100
+@@ -153,6 +153,8 @@
+ #define SIZE_TYPE (INT_TYPE_SIZE == 8 ? "long unsigned int" : "unsigned int")
+ #define PTRDIFF_TYPE (INT_TYPE_SIZE == 8 ? "long int" :"int")
+ 
++#define WCHAR_TYPE "int"
++#define WINT_TYPE "int"
+ #define WCHAR_TYPE_SIZE 16
+ 
+ #define FIRST_PSEUDO_REGISTER 37
+ 
+@@ -563,6 +560,10 @@
+   /* 'true' - if current function is a signal function 
+      as specified by the "signal" attribute.  */
+   int is_signal;
++
++  /* 'true' - if current function is an nmi function 
++     as specified by the "nmi" attribute.  */
++  int is_nmi;
+   
+   /* 'true' - if current function is a 'task' function 
+      as specified by the "OS_task" attribute.  */
+Only in gcc-7.3.0-patched/gcc/config/avr: avr.h.orig
+diff -ur gcc/gcc/config/avr/avr.opt gcc-7.3.0-patched/gcc/config/avr/avr.opt
+--- gcc/gcc/config/avr/avr.opt	2017-01-09 22:48:33.107036000 +0100
++++ gcc-7.3.0-patched/gcc/config/avr/avr.opt	2018-11-29 15:40:15.272300988 +0100
+
+@@ -34,6 +34,10 @@
+ Target RejectNegative Joined Var(avr_n_flash) UInteger Init(-1)
+ Set the number of 64 KiB flash segments.
+ 
++mnon-bit-addressable-registers-mask=
++Target Report Joined Var(avr_deferred_options) Defer
++Set the 32 bit mask for non bit addressable registers.
++
+ mskip-bug
+ Target Mask(SKIP_BUG)
+ Indicate presence of a processor erratum.
+
+diff -ur gcc/gcc/config/avr/avr-protos.h gcc-7.3.0-patched/gcc/config/avr/avr-protos.h
+--- gcc/gcc/config/avr/avr-protos.h	2017-01-01 13:07:43.905435000 +0100
++++ gcc-7.3.0-patched/gcc/config/avr/avr-protos.h	2018-11-29 15:40:15.272300988 +0100
+@@ -184,3 +182,4 @@
+ } avr_log_t;
+ 
+ extern avr_log_t avr_log;
++extern unsigned long avr_non_bit_addressable_registers_mask;
+
+
+diff -ur gcc/gcc/config/avr/gen-avr-mmcu-specs.cc gcc-7.3.0-patched/gcc/config/avr/gen-avr-mmcu-specs.cc
+--- gcc/gcc/config/avr/gen-avr-mmcu-specs.cc	2017-01-01 13:07:43.905435000 +0100
++++ gcc-7.3.0-patched/gcc/config/avr/gen-avr-mmcu-specs.cc	2018-12-03 11:07:38.331430937 +0100
+@@ -212,6 +212,15 @@
+            ? "\t%{!mno-absdata: -mabsdata}"
+            : "\t%{mabsdata}");
+ 
++  if (mcu->non_bit_addressable_registers_mask)
++    fprintf (f, "*cc1_non_bit_addressable_registers_mask:\n"
++                "\t-mnon-bit-addressable-registers-mask=%#x\n\n",
++                mcu->non_bit_addressable_registers_mask);
++
++  fprintf (f, "*cc1_absdata:\n%s\n\n", absdata
++           ? "\t%{!mno-absdata: -mabsdata}"
++           : "\t%{mabsdata}");
++
+   // avr-gcc specific specs for assembling / the assembler.
+ 
+   fprintf (f, "*asm_arch:\n\t-mmcu=%s\n\n", arch->name);
+   
+   
+diff -ur gcc/gcc/config/avr/predicates.md gcc-7.3.0-patched/gcc/config/avr/predicates.md
+--- gcc/gcc/config/avr/predicates.md	2017-01-01 13:07:43.905435000 +0100
++++ gcc-7.3.0-patched/gcc/config/avr/predicates.md	2018-11-29 15:40:16.878967668 +0100
+@@ -42,11 +42,13 @@
+   (and (match_code "reg")
+        (match_test "REGNO (op) == REG_SP")))
+ 
+-;; Return true if OP is a valid address for lower half of I/O space.
++;; Return true if OP is a valid address for lower half of I/O space
++;; and it is bit addressable
+ (define_special_predicate "low_io_address_operand"
+   (ior (and (match_code "const_int")
+ 	    (match_test "IN_RANGE (INTVAL (op) - avr_arch->sfr_offset,
+-				   0, 0x1F)"))
++				   0, 0x1F) &&
++         (((1 << (INTVAL (op) - avr_arch->sfr_offset)) & avr_non_bit_addressable_registers_mask) == 0)"))
+        (and (match_code "symbol_ref")
+ 	    (match_test "SYMBOL_REF_FLAGS (op) & SYMBOL_FLAG_IO_LOW"))))
+ 
+Only in gcc-7.3.0-patched/gcc/config/avr: specs.h.orig
+Only in gcc-7.3.0-patched/gcc/config/avr: specs.h.rej
+diff -ur gcc/gcc/config/avr/specs.h gcc-7.3.0-patched/gcc/config/avr/specs.h
+--- gcc/gcc/config/avr/specs.h  2017-01-01 13:07:43.905435000 +0100
++++ gcc-7.3.0-patched/gcc/config/avr/specs.h  2018-12-03 12:12:09.734746759 +0100
+@@ -35,6 +35,7 @@
+   "%(cc1_n_flash) "                             \
+   "%(cc1_errata_skip) "                         \
+   "%(cc1_rmw) "                                 \
++  "%(cc1_non_bit_addressable_registers_mask) "  \
+   "%(cc1_absdata) "
+ 
+ #undef  CC1PLUS_SPEC
+ 
+ 
+diff -ur gcc/gcc/ira.cc gcc-7.3.0-patched/gcc/ira.cc
+--- gcc/gcc/ira.cc	2017-10-18 23:13:16.833810000 +0200
++++ gcc-7.3.0-patched/gcc/ira.cc	2018-11-29 15:40:16.902301000 +0100
+@@ -5068,7 +5068,10 @@
+   auto_bitmap need_new, reachable;
+   vec<basic_block> queue;
+ 
+-  if (!SHRINK_WRAPPING_ENABLED)
++	/* Restore 4.9 behavior of splitting live range even if target does
++		 not have simple_return. This helps fix code size increase for the
++		 avr target - see AVRTC-804 */
++  if (!flag_shrink_wrap)
+     return false;
+ 
+   queue.create (n_basic_blocks_for_fn (cfun));
+
+
+diff -ur gcc/gcc/tree.h gcc-7.3.0-patched/gcc/tree.h
+--- gcc/gcc/tree.h	2017-11-29 23:13:34.210836000 +0100
++++ gcc-7.3.0-patched/gcc/tree.h	2018-11-29 15:40:24.152301052 +0100
+@@ -21,6 +21,7 @@
+ #define GCC_TREE_H
+ 
+ #include "tree-core.h"
++#include "machmode.h"
+ 
+ /* Convert a target-independent built-in function code to a combined_fn.  */
+ 

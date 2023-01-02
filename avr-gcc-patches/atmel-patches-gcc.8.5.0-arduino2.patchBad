@@ -1,0 +1,144 @@
+diff -ruN ./downloads/gcc-8.5.0/gcc/config/avr/avr-arch.h ./gcc/gcc/config/avr/avr-arch.h
+--- ./downloads/gcc-8.5.0/gcc/config/avr/avr-arch.h	2021-05-14 10:42:08.000000000 +0200
++++ ./gcc/config/avr/avr-arch.h	2022-12-28 22:10:23.317024378 +0100
+@@ -124,6 +124,9 @@
+   /* Start of text section. */
+   int text_section_start;
+ 
++  /* Non bit addressable registers mask.  */
++  unsigned int non_bit_addressable_registers_mask;
++
+   /* Flash size in bytes.  */
+   int flash_size;
+ 
+diff -ruN ./downloads/gcc-8.5.0/gcc/config/avr/avr.c ./gcc/gcc/config/avr/avr.c
+--- ./downloads/gcc-8.5.0/gcc/config/avr/avr.c	2021-05-14 10:42:08.000000000 +0200
++++ ./gcc/config/avr/avr.c	2022-12-28 22:10:23.337034379 +0100
+@@ -55,6 +55,8 @@
+ #include "builtins.h"
+ #include "context.h"
+ #include "tree-pass.h"
++#include "vec.h"
++#include "opts.h"
+ #include "print-rtl.h"
+ #include "rtl-iter.h"
+ 
+@@ -123,6 +125,8 @@
+   { ADDR_SPACE_MEMX, 1, 3, "__memx",  0, ".progmemx.data" },
+ };
+ 
++unsigned long avr_non_bit_addressable_registers_mask;
++
+ 
+ /* Holding RAM addresses of some SFRs used by the compiler and that
+    are unique over all devices in an architecture like 'avr4'.  */
+
+diff -ruN ./downloads/gcc-8.5.0/gcc/config/avr/avr.h ./gcc/gcc/config/avr/avr.h
+--- ./downloads/gcc-8.5.0/gcc/config/avr/avr.h	2021-05-14 10:42:08.000000000 +0200
++++ ./gcc/config/avr/avr.h	2022-12-28 22:10:23.341036379 +0100
+@@ -149,6 +149,8 @@
+ #define SIZE_TYPE (INT_TYPE_SIZE == 8 ? "long unsigned int" : "unsigned int")
+ #define PTRDIFF_TYPE (INT_TYPE_SIZE == 8 ? "long int" :"int")
+ 
++#define WCHAR_TYPE "int"
++#define WINT_TYPE "int"
+ #define WCHAR_TYPE_SIZE 16
+ 
+ #define FIRST_PSEUDO_REGISTER 36
+diff -ruN ./downloads/gcc-8.5.0/gcc/config/avr/avr.opt ./gcc/gcc/config/avr/avr.opt
+--- ./downloads/gcc-8.5.0/gcc/config/avr/avr.opt	2021-05-14 10:42:08.000000000 +0200
++++ ./gcc/config/avr/avr.opt	2022-12-28 22:10:23.353042379 +0100
+@@ -34,6 +34,10 @@
+ Target RejectNegative Joined Var(avr_n_flash) UInteger Init(-1)
+ Set the number of 64 KiB flash segments.
+ 
++mnon-bit-addressable-registers-mask=
++Target Report Joined Var(avr_deferred_options) Defer
++Set the 32 bit mask for non bit addressable registers.
++
+ mskip-bug
+ Target Report Mask(SKIP_BUG)
+ Indicate presence of a processor erratum.
+diff -ruN ./downloads/gcc-8.5.0/gcc/config/avr/avr-protos.h ./gcc/gcc/config/avr/avr-protos.h
+--- ./downloads/gcc-8.5.0/gcc/config/avr/avr-protos.h	2021-05-14 10:42:08.000000000 +0200
++++ ./gcc/config/avr/avr-protos.h	2022-12-28 22:10:23.357044379 +0100
+@@ -182,3 +182,4 @@
+ } avr_log_t;
+ 
+ extern avr_log_t avr_log;
++extern unsigned long avr_non_bit_addressable_registers_mask;
+diff -ruN ./downloads/gcc-8.5.0/gcc/config/avr/gen-avr-mmcu-specs.c ./gcc/gcc/config/avr/gen-avr-mmcu-specs.c
+--- ./downloads/gcc-8.5.0/gcc/config/avr/gen-avr-mmcu-specs.c	2021-05-14 10:42:08.000000000 +0200
++++ ./gcc/config/avr/gen-avr-mmcu-specs.c	2022-12-28 22:10:23.369050379 +0100
+@@ -212,6 +212,15 @@
+            ? "\t%{!mno-absdata: -mabsdata}"
+            : "\t%{mabsdata}");
+ 
++  if (mcu->non_bit_addressable_registers_mask)
++    fprintf (f, "*cc1_non_bit_addressable_registers_mask:\n"
++                "\t-mnon-bit-addressable-registers-mask=%#x\n\n",
++                mcu->non_bit_addressable_registers_mask);
++
++  fprintf (f, "*cc1_absdata:\n%s\n\n", absdata
++           ? "\t%{!mno-absdata: -mabsdata}"
++           : "\t%{mabsdata}");
++
+   // avr-gcc specific specs for assembling / the assembler.
+ 
+   fprintf (f, "*asm_arch:\n\t-mmcu=%s\n\n", arch->name);
+diff -ruN ./downloads/gcc-8.5.0/gcc/config/avr/predicates.md ./gcc/gcc/config/avr/predicates.md
+--- ./downloads/gcc-8.5.0/gcc/config/avr/predicates.md	2021-05-14 10:42:08.000000000 +0200
++++ ./gcc/config/avr/predicates.md	2022-12-28 22:10:23.377054379 +0100
+@@ -42,11 +42,13 @@
+   (and (match_code "reg")
+        (match_test "REGNO (op) == REG_SP")))
+ 
+-;; Return true if OP is a valid address for lower half of I/O space.
++;; Return true if OP is a valid address for lower half of I/O space
++;; and it is bit addressable
+ (define_special_predicate "low_io_address_operand"
+   (ior (and (match_code "const_int")
+ 	    (match_test "IN_RANGE (INTVAL (op) - avr_arch->sfr_offset,
+-				   0, 0x1F)"))
++				   0, 0x1F) &&
++         (((1 << (INTVAL (op) - avr_arch->sfr_offset)) & avr_non_bit_addressable_registers_mask) == 0)"))
+        (and (match_code "symbol_ref")
+ 	    (match_test "SYMBOL_REF_FLAGS (op) & SYMBOL_FLAG_IO_LOW"))))
+ 
+diff -ruN ./downloads/gcc-8.5.0/gcc/config/avr/specs.h ./gcc/gcc/config/avr/specs.h
+--- ./downloads/gcc-8.5.0/gcc/config/avr/specs.h	2021-05-14 10:42:08.000000000 +0200
++++ ./gcc/config/avr/specs.h	2022-12-28 22:10:23.377054379 +0100
+@@ -35,6 +35,7 @@
+   "%(cc1_n_flash) "                             \
+   "%(cc1_errata_skip) "                         \
+   "%(cc1_rmw) "                                 \
++  "%(cc1_non_bit_addressable_registers_mask) "  \
+   "%(cc1_absdata) "
+ 
+ #undef  CC1PLUS_SPEC
+diff -ruN ./downloads/gcc-8.5.0/gcc/ira.c ./gcc/gcc/ira.c
+--- ./downloads/gcc-8.5.0/gcc/ira.c	2021-05-14 10:42:09.000000000 +0200
++++ ./gcc/ira.c	2022-12-28 22:10:23.381056379 +0100
+@@ -4891,7 +4891,10 @@
+   auto_bitmap need_new, reachable;
+   vec<basic_block> queue;
+ 
+-  if (!SHRINK_WRAPPING_ENABLED)
++	/* Restore 4.9 behavior of splitting live range even if target does
++		 not have simple_return. This helps fix code size increase for the
++		 avr target - see AVRTC-804 */
++  if (!flag_shrink_wrap)
+     return false;
+ 
+   queue.create (n_basic_blocks_for_fn (cfun));
+diff -ruN ./downloads/gcc-8.5.0/gcc/tree.h ./gcc/gcc/tree.h
+--- ./downloads/gcc-8.5.0/gcc/tree.h	2021-05-14 10:42:10.000000000 +0200
++++ ./gcc/tree.h	2022-12-28 22:10:23.385058379 +0100
+@@ -21,6 +21,7 @@
+ #define GCC_TREE_H
+ 
+ #include "tree-core.h"
++#include "machmode.h"
+ 
+ /* Convert a target-independent built-in function code to a combined_fn.  */
+ 
