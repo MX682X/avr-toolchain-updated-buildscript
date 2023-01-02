@@ -88,7 +88,7 @@ else
 fi
 
 # if we are cross-compiling, make sure that avr-gcc for the build system works
-#if [[ x${CROSS_COMPILE} != x ]]; then
+if [[ x${CROSS_COMPILE} != x ]]; then
 	if [[ x${AVRGCC_BUILDSYS_DIR} != x ]]; then
 		cd ${AVRGCC_BUILDSYS_DIR}/bin
 		if [[ ! -f ./avr-gcc ]] && [[ ! -f ./avr-g++ ]]; then
@@ -106,7 +106,7 @@ fi
 		fi
 		cd ../../	
 	fi
-#fi
+fi
 
 
 if [[ $CROSS_COMPILE == "mingw" ]] ; then
